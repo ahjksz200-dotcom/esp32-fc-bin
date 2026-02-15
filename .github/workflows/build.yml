@@ -1,7 +1,9 @@
-name: Build ESP32 BIN
+name: Build ESP32 Smart Gyro BIN
 
 on:
   push:
+    branches: [ "main" ]
+  pull_request:
     branches: [ "main" ]
 
 jobs:
@@ -9,27 +11,30 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
-
-      - name: Install ESP32 core
+      - name: Install Arduino CLI
         run: |
-          arduino-cli config set board_manager.additional_urls https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-          arduino-cli core update-index
-          arduino-cli core install esp32:esp32
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          sudo mv bin/arduino-cli /usr/local/bin/
 
-      - name: Compile
+      - name: Install ESP32 Platform
         run: |
-          arduino-cli compile \
-            --fqbn esp32:esp32:esp32 \
-            --export-binaries \
-            ./esp32_fc
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.0.7 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
 
-      - name: Upload BIN
-        uses: actions/upload-artifact@v4
+      - name: Compile Sketch
+        run: |
+          # FQBN cấu hình cho ESP32 Dev Module với Flash Mode là DIO
+          arduino-cli compile --fqbn esp32:esp32:esp32 \
+          --build-property "build.flash_mode=dio" \
+          --build-property "build.flash_freq=40m" \
+          --output-dir ./build ./esp32_fc/esp32_fc.ino
+
+      - name: Upload BIN Artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: esp32-bin
-          path: esp32_fc/build/**
+          name: esp32-smart-gyro-bin
+          path: ./build/*.bin
+          
