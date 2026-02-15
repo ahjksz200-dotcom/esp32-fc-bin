@@ -33,7 +33,7 @@ jobs:
           --output-dir ./build ./esp32_fc/esp32_fc.ino
 
       - name: Upload BIN Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: esp32-smart-gyro-bin
           path: ./build/*.bin
