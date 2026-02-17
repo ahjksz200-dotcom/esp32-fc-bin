@@ -8,18 +8,15 @@
 const int FREQ = 50, RES = 16, MAX_DUTY = 65535;
 
 // --- TÙY CHỈNH TẠI ĐÂY ---
-float EXPO = 0.6;       // Tăng lên 0.6 để thấy rõ (0.0 là tắt)
-float LIMIT_ANGLE = 30; // GIỚI HẠN GÓC (Độ): Máy bay sẽ không bao giờ vểnh quá mức này
-int TRIM_L = 1500;      // Tinh chỉnh phẳng cánh trái
-int TRIM_R = 1500;      // Tinh chỉnh phẳng cánh phải
+float EXPO = 0.6;       
+float LIMIT_ANGLE = 25; // GIỚI HẠN GÓC (Độ): Thử để thấp (ví dụ 15-20) để thấy nó bị chặn
+int TRIM_L = 1500;      
+int TRIM_R = 1500;      
 
 long midP = 1500, midR = 1500;
 
-// Hàm Expo mới: Chạy dựa trên tỷ lệ %, đảm bảo luôn có tác dụng
 float applyExpo(float input, float expo) {
-  float in = input / 500.0; // Đưa về -1.0 đến 1.0
-  in = constrain(in, -1.0, 1.0);
-  // Công thức Expo chuẩn quốc tế
+  float in = constrain(input / 500.0, -1.0, 1.0);
   float out = (1 - expo) * in + expo * (in * in * in);
   return out * 500.0;
 }
@@ -31,7 +28,7 @@ void setup() {
   pinMode(P_IN, INPUT_PULLDOWN);
   pinMode(R_IN, INPUT_PULLDOWN);
 
-  Serial.println(">>> ĐANG HỌC LỆNH TAY ĐIỀU KHIỂN...");
+  Serial.println(">>> DANG HOC LENH (THA CAN VE GIUA)...");
   delay(2000); 
   
   long sumP = 0, sumR = 0;
@@ -45,46 +42,44 @@ void setup() {
 }
 
 void loop() {
-  // Đọc xung với Timeout ngắn để Failsafe nhạy
   long pI = pulseIn(P_IN, HIGH, 25000); 
   long rI = pulseIn(R_IN, HIGH, 25000);
 
-  // --- CƠ CHẾ FAILSAFE MỚI ---
-  // Nếu rút dây hoặc tắt TX, pulseIn trả về 0 hoặc giá trị rác
-  bool isLostSignal = (pI == 0 || rI == 0 || pI < 800 || pI > 2200);
+  // --- 1. KIỂM TRA FAILSAFE TRƯỚC (BẮT BUỘC) ---
+  bool isLost = (pI == 0 || pI < 900 || pI > 2100 || rI == 0 || rI < 900 || rI > 2100);
   
-  if (isLostSignal) {
-    pI = midP; // Ép về giữa
-    rI = midR; // Ép về giữa
+  if (isLost) {
+    pI = midP; // Ép giá trị đọc được về điểm giữa đã học
+    rI = midR;
   }
 
-  // Tính độ lệch từ điểm giữa
-  float pRaw = pI - midP;
-  float rRaw = rI - midR;
+  // --- 2. TÍNH TOÁN DỰA TRÊN GIÁ TRỊ ĐÃ XỬ LÝ FAILSAFE ---
+  float pRaw = (float)pI - midP;
+  float rRaw = (float)rI - midR;
 
   // Áp dụng EXPO
   float pAfter = applyExpo(pRaw, EXPO);
   float rAfter = applyExpo(rRaw, EXPO);
 
-  // --- GIỚI HẠN GÓC (LIMIT ANGLE) ---
-  // Chuyển đổi từ xung (500us) sang góc lệch tối đa (LIMIT_ANGLE)
-  // Xung 1us tương đương khoảng 0.1 độ
-  float pFinal = constrain(pAfter, -LIMIT_ANGLE * 10, LIMIT_ANGLE * 10);
-  float rFinal = constrain(rAfter, -LIMIT_ANGLE * 10, LIMIT_ANGLE * 10);
+  // --- 3. GIỚI HẠN GÓC (LIMIT ANGLE) - Ép biên cực độ ---
+  // Mỗi 10us tương đương khoảng 1 độ lệch. 
+  float maxDiff = LIMIT_ANGLE * 10.0; 
+  float pFinal = constrain(pAfter, -maxDiff, maxDiff);
+  float rFinal = constrain(rAfter, -maxDiff, maxDiff);
 
-  // Mixer Elevon + Sync
-  float vL = TRIM_L + pFinal + rFinal;
-  float vR = TRIM_R - pFinal + rFinal;
+  // --- 4. MIXER ELEVON + SYNC ---
+  float vL = (float)TRIM_L + pFinal + rFinal;
+  float vR = (float)TRIM_R - pFinal + rFinal;
 
-  // Xuất xung an toàn
+  // --- 5. XUẤT XUNG AN TOÀN ---
   ledcWrite(L_PIN, (constrain(vL, 1100, 1900) / 20000.0) * MAX_DUTY);
   ledcWrite(R_PIN, (constrain(vR, 1100, 1900) / 20000.0) * MAX_DUTY);
 
   if (millis() % 500 == 0) {
-    if(isLostSignal) Serial.println("!!! FAILSAFE ACTIVE !!!");
+    if(isLost) Serial.println("!!! FAILSAFE COMMANDING SERVOS TO CENTER !!!");
     else {
-      Serial.print("Raw:"); Serial.print(pRaw);
-      Serial.print(" -> Expo:"); Serial.println(pAfter);
+      Serial.print("P_Final:"); Serial.print(pFinal);
+      Serial.print(" | L_Out:"); Serial.println(vL);
     }
   }
   delay(10);
