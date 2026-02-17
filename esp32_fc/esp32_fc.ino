@@ -1,139 +1,77 @@
-#include <Wire.h>
+#include <Arduino.h>
 
-// --- CẤU HÌNH CHÂN PIN ---
-#define MPU_ADDR 0x68
-#define LEFT_SERVO_PIN 13
-#define RIGHT_SERVO_PIN 12
-#define PWM_PITCH_IN 14
-#define PWM_ROLL_IN  27
+// --- 1. CẤU HÌNH CHÂN CẮM (Pinout) ---
+#define L_PIN 13    // Servo cánh trái
+#define R_PIN 12    // Servo cánh phải
+#define P_IN 14     // Tín hiệu Pitch từ RX (Lên/Xuống)
+#define R_IN 27     // Tín hiệu Roll từ RX (Trái/Phải)
 
-// --- THÔNG SỐ PWM MỚI (ESP32 Core v3.x) ---
-#define PWM_FREQ 50
-#define PWM_RES 16 
+// --- 2. TÙY CHỈNH CẢM GIÁC BAY ---
+float EXPO = 0.4;   // Độ mượt: 0.0 (thẳng), 0.4 (bay mượt), 0.7 (rất mượt ở giữa cần)
+float RATE = 0.8;   // Độ hỗn: 0.8 (an toàn cho máy bay nhanh), 1.0 (hết công suất)
 
-// --- CẤU TRÚC PID ---
-struct PID {
-  float kp, ki, kd;
-  float integral, lastError;
-};
+// Thông số kỹ thuật PWM
+const int FREQ = 50, RES = 16, MAX_DUTY = 65535;
 
-// --- KHU VỰC CÂN CHỈNH (TUNING) ---
-PID pPID = {15.0, 0.05, 2.0}; 
-PID rPID = {15.0, 0.05, 2.0}; 
-PID yPID = {12.0, 0.02, 1.0}; 
-
-float max_angle = 40.0;       
-int flightMode = 0;           
-
-// --- BIẾN TOÀN CỤC ---
-float ax, ay, az, gx, gy, gz;
-float offsetGX, offsetGY, offsetGZ;
-float roll = 0, pitch = 0;
-unsigned long lastTime;
-
-void writeReg(uint8_t reg, uint8_t data) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(reg);
-  Wire.write(data);
-  Wire.endTransmission();
-}
-
-float runPID(float target, float actual, PID &p, float dt) {
-  float error = target - actual;
-  p.integral += error * dt;
-  p.integral = constrain(p.integral, -50, 50); 
-  float derivative = (error - p.lastError) / dt;
-  p.lastError = error;
-  return (error * p.kp) + (p.integral * p.ki) + (derivative * p.kd);
+// Hàm xử lý EXPO (Giúp tay lái không bị quá "hỗn" ở vị trí giữa)
+float applyExpo(float input, float expo) {
+  float in = constrain(input / 500.0, -1.0, 1.0); 
+  float out = (1 - expo) * in + expo * (in * in * in);
+  return out * 500.0;
 }
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(21, 22);
-  writeReg(0x6B, 0x00); 
 
-  // 1. AUTO-CALIBRATION
-  Serial.println(">>> CALIBRATING...");
-  float sumX = 0, sumY = 0, sumZ = 0;
-  for (int i = 0; i < 500; i++) {
-    Wire.beginTransmission(MPU_ADDR);
-    Wire.write(0x43); 
-    Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 6);
-    sumX += (int16_t)(Wire.read() << 8 | Wire.read()) / 131.0;
-    sumY += (int16_t)(Wire.read() << 8 | Wire.read()) / 131.0;
-    sumZ += (int16_t)(Wire.read() << 8 | Wire.read()) / 131.0;
-    delay(2);
-  }
-  offsetGX = sumX / 500.0;
-  offsetGY = sumY / 500.0;
-  offsetGZ = sumZ / 500.0;
+  // Khởi động mềm: Đợi 1.5s cho nguồn ổn định trước khi cấp xung Servo
+  pinMode(L_PIN, OUTPUT); digitalWrite(L_PIN, LOW);
+  pinMode(R_PIN, OUTPUT); digitalWrite(R_PIN, LOW);
+  delay(1500);
 
-  // 2. CẤU HÌNH PWM KIỂU MỚI (LEDC V3.x)
-  // Không dùng ledcSetup nữa, dùng ledcAttach trực tiếp
-  ledcAttach(LEFT_SERVO_PIN, PWM_FREQ, PWM_RES);
-  ledcAttach(RIGHT_SERVO_PIN, PWM_FREQ, PWM_RES);
+  // Thiết lập PWM cho ESP32
+  ledcAttach(L_PIN, FREQ, RES);
+  ledcAttach(R_PIN, FREQ, RES);
 
-  pinMode(PWM_PITCH_IN, INPUT);
-  pinMode(PWM_ROLL_IN, INPUT);
+  // Thiết lập chân đọc RX (Dùng PULLDOWN để chống nhiễu khi rút dây)
+  pinMode(P_IN, INPUT_PULLDOWN);
+  pinMode(R_IN, INPUT_PULLDOWN);
 
-  lastTime = micros();
+  Serial.println(">>> AIRPLANE READY: MANUAL PRO MODE ENABLED!");
+  Serial.println(">>> FAILSAFE: ACTIVE | EXPO: " + String(EXPO));
 }
 
 void loop() {
-  unsigned long currentTime = micros();
-  float dt = (currentTime - lastTime) / 1000000.0;
-  if (dt <= 0) dt = 0.005;
-  lastTime = currentTime;
+  // 1. Đọc xung từ Bộ thu (RX) với Timeout 25ms
+  long pI = pulseIn(P_IN, HIGH, 25000);
+  long rI = pulseIn(R_IN, HIGH, 25000);
 
-  // Đọc cảm biến
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x3B);
-  Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14);
-  ax = (int16_t)(Wire.read() << 8 | Wire.read()) / 16384.0;
-  ay = (int16_t)(Wire.read() << 8 | Wire.read()) / 16384.0;
-  az = (int16_t)(Wire.read() << 8 | Wire.read()) / 16384.0;
-  Wire.read(); Wire.read(); 
-  gx = ((int16_t)(Wire.read() << 8 | Wire.read()) / 131.0) - offsetGX;
-  gy = ((int16_t)(Wire.read() << 8 | Wire.read()) / 131.0) - offsetGY;
-  gz = ((int16_t)(Wire.read() << 8 | Wire.read()) / 131.0) - offsetGZ;
+  // 2. TẦNG FAILSAFE: Nếu mất sóng hoặc dây lỏng, tự động ép về 1500 (giữa)
+  if (pI < 950 || pI > 2050) pI = 1500;
+  if (rI < 950 || rI > 2050) rI = 1500;
 
-  // Tính toán góc
-  float pAcc = atan2(ax, sqrt(ay * ay + az * az)) * 180.0 / PI;
-  float rAcc = atan2(ay, az) * 180.0 / PI;
-  pitch = 0.98 * (pitch + gy * dt) + 0.02 * pAcc;
-  roll  = 0.98 * (roll + gx * dt) + 0.02 * rAcc;
+  // 3. TÍNH TOÁN ĐỘ LỆCH (Auto-Center)
+  // Khi bạn buông cần, pDiff và rDiff sẽ về 0.
+  float pDiff = applyExpo(pI - 1500, EXPO) * RATE;
+  float rDiff = applyExpo(rI - 1500, EXPO) * RATE;
 
-  // Đọc RX & Failsafe
-  long pIn = pulseIn(PWM_PITCH_IN, HIGH, 25000);
-  long rIn = pulseIn(PWM_ROLL_IN, HIGH, 25000);
-  float targetP = 0, targetR = 0;
-  if (pIn == 0 || rIn == 0) {
-    targetP = 0; targetR = 0;
-  } else {
-    targetP = map(pIn, 1000, 2000, -max_angle, max_angle);
-    targetR = map(rIn, 1000, 2000, -max_angle, max_angle);
+  // 4. MIXER ELEVON: Trộn lệnh cho cánh bằng
+  // Nếu gạt Pitch lên mà máy bay đi xuống (ngược hướng), hãy đổi dấu + thành - 
+  float vL = 1500 + pDiff + rDiff;
+  float vR = 1500 - pDiff + rDiff;
+
+  // 5. GIỚI HẠN AN TOÀN (Constrain): Bảo vệ Servo không bị kẹt cơ khí
+  vL = constrain(vL, 1150, 1850);
+  vR = constrain(vR, 1150, 1850);
+
+  // 6. XUẤT XUNG ĐIỀU KHIỂN
+  ledcWrite(L_PIN, (vL / 20000.0) * MAX_DUTY);
+  ledcWrite(R_PIN, (vR / 20000.0) * MAX_DUTY);
+
+  // Log dữ liệu để chẩn đoán qua Terminal (tốc độ chậm để không lag)
+  if (millis() % 500 == 0) {
+    Serial.print("P: "); Serial.print(pI);
+    Serial.print(" | R: "); Serial.println(rI);
   }
 
-  // PID 3 Trục
-  float outP = runPID(targetP, pitch, pPID, dt);
-  float outR = runPID(targetR, roll, rPID, dt);
-  float outY = runPID(0, gz, yPID, dt);
-
-  // Mixer Elevon
-  float leftUs  = 1500 + outP + outR + outY;
-  float rightUs = 1500 - outP + outR + outY;
-
-  leftUs = constrain(leftUs, 1000, 2000);
-  rightUs = constrain(rightUs, 1000, 2000);
-
-  // XUẤT PWM KIỂU MỚI (Sử dụng ledcWrite trực tiếp vào chân Pin)
-  uint32_t dutyL = (leftUs / 20000.0) * ((1 << PWM_RES) - 1);
-  uint32_t dutyR = (rightUs / 20000.0) * ((1 << PWM_RES) - 1);
-  
-  ledcWrite(LEFT_SERVO_PIN, dutyL);
-  ledcWrite(RIGHT_SERVO_PIN, dutyR);
-
-  delay(5);
+  delay(10); // Tần số điều khiển 100Hz
 }
