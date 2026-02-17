@@ -1,77 +1,80 @@
 #include <Arduino.h>
 
-// --- 1. CẤU HÌNH CHÂN CẮM (Pinout) ---
-#define L_PIN 13    // Servo cánh trái
-#define R_PIN 12    // Servo cánh phải
-#define P_IN 14     // Tín hiệu Pitch từ RX (Lên/Xuống)
-#define R_IN 27     // Tín hiệu Roll từ RX (Trái/Phải)
+// --- 1. CẤU HÌNH PIN ---
+#define L_PIN 13
+#define R_PIN 12
+#define P_IN 14
+#define R_IN 27
 
-// --- 2. TÙY CHỈNH CẢM GIÁC BAY ---
-float EXPO = 0.4;   // Độ mượt: 0.0 (thẳng), 0.4 (bay mượt), 0.7 (rất mượt ở giữa cần)
-float RATE = 0.8;   // Độ hỗn: 0.8 (an toàn cho máy bay nhanh), 1.0 (hết công suất)
+// --- 2. ĐỒNG BỘ SERVO (SERVO SYNC) ---
+// Nếu servo bên trái hơi cao, hãy giảm số này (ví dụ 1480)
+// Nếu servo bên phải hơi thấp, hãy tăng số này (ví dụ 1520)
+int TRIM_L = 1500; 
+int TRIM_R = 1500; 
 
-// Thông số kỹ thuật PWM
 const int FREQ = 50, RES = 16, MAX_DUTY = 65535;
 
-// Hàm xử lý EXPO (Giúp tay lái không bị quá "hỗn" ở vị trí giữa)
+// Biến lưu điểm giữa học được từ tay điều khiển
+long midP = 1500, midR = 1500;
+float EXPO = 0.5; 
+float RATE = 0.9;
+
 float applyExpo(float input, float expo) {
-  float in = constrain(input / 500.0, -1.0, 1.0); 
+  float in = constrain(input / 500.0, -1.0, 1.0);
   float out = (1 - expo) * in + expo * (in * in * in);
   return out * 500.0;
 }
 
 void setup() {
   Serial.begin(115200);
-
-  // Khởi động mềm: Đợi 1.5s cho nguồn ổn định trước khi cấp xung Servo
-  pinMode(L_PIN, OUTPUT); digitalWrite(L_PIN, LOW);
-  pinMode(R_PIN, OUTPUT); digitalWrite(R_PIN, LOW);
-  delay(1500);
-
-  // Thiết lập PWM cho ESP32
+  
   ledcAttach(L_PIN, FREQ, RES);
   ledcAttach(R_PIN, FREQ, RES);
-
-  // Thiết lập chân đọc RX (Dùng PULLDOWN để chống nhiễu khi rút dây)
   pinMode(P_IN, INPUT_PULLDOWN);
   pinMode(R_IN, INPUT_PULLDOWN);
 
-  Serial.println(">>> AIRPLANE READY: MANUAL PRO MODE ENABLED!");
-  Serial.println(">>> FAILSAFE: ACTIVE | EXPO: " + String(EXPO));
+  // HỌC ĐIỂM GIỮA (Giúp Auto-Center hoạt động chuẩn)
+  Serial.println(">>> THA CAN VE GIUA DE DONG BO...");
+  delay(2000); 
+  
+  long sumP = 0, sumR = 0;
+  for(int i=0; i<10; i++) {
+    sumP += pulseIn(P_IN, HIGH, 30000);
+    sumR += pulseIn(R_IN, HIGH, 30000);
+    delay(20);
+  }
+  midP = (sumP / 10 > 900) ? sumP / 10 : 1500;
+  midR = (sumR / 10 > 900) ? sumR / 10 : 1500;
+
+  Serial.printf("Center Learned: P=%ld, R=%ld\n", midP, midR);
 }
 
 void loop() {
-  // 1. Đọc xung từ Bộ thu (RX) với Timeout 25ms
-  long pI = pulseIn(P_IN, HIGH, 25000);
+  // Đọc xung RX
+  long pI = pulseIn(P_IN, HIGH, 25000); 
   long rI = pulseIn(R_IN, HIGH, 25000);
 
-  // 2. TẦNG FAILSAFE: Nếu mất sóng hoặc dây lỏng, tự động ép về 1500 (giữa)
-  if (pI < 950 || pI > 2050) pI = 1500;
-  if (rI < 950 || rI > 2050) rI = 1500;
+  // FAILSAFE: Nếu mất tín hiệu (rút dây hoặc tắt TX)
+  if (pI == 0 || pI < 900 || pI > 2100) pI = midP;
+  if (rI == 0 || rI < 900 || rI > 2100) rI = midR;
 
-  // 3. TÍNH TOÁN ĐỘ LỆCH (Auto-Center)
-  // Khi bạn buông cần, pDiff và rDiff sẽ về 0.
-  float pDiff = applyExpo(pI - 1500, EXPO) * RATE;
-  float rDiff = applyExpo(rI - 1500, EXPO) * RATE;
+  // Tính toán độ lệch có kèm EXPO
+  float pDiff = applyExpo(pI - midP, EXPO) * RATE;
+  float rDiff = applyExpo(rI - midR, EXPO) * RATE;
 
-  // 4. MIXER ELEVON: Trộn lệnh cho cánh bằng
-  // Nếu gạt Pitch lên mà máy bay đi xuống (ngược hướng), hãy đổi dấu + thành - 
-  float vL = 1500 + pDiff + rDiff;
-  float vR = 1500 - pDiff + rDiff;
+  // MIXER ELEVON + ĐỒNG BỘ TRIM
+  // Thay vì cộng vào 1500, mình cộng vào giá trị TRIM riêng của mỗi bên
+  float vL = TRIM_L + pDiff + rDiff;
+  float vR = TRIM_R - pDiff + rDiff;
 
-  // 5. GIỚI HẠN AN TOÀN (Constrain): Bảo vệ Servo không bị kẹt cơ khí
-  vL = constrain(vL, 1150, 1850);
-  vR = constrain(vR, 1150, 1850);
+  // Giới hạn an toàn và xuất xung
+  ledcWrite(L_PIN, (constrain(vL, 1100, 1900) / 20000.0) * MAX_DUTY);
+  ledcWrite(R_PIN, (constrain(vR, 1100, 1900) / 20000.0) * MAX_DUTY);
 
-  // 6. XUẤT XUNG ĐIỀU KHIỂN
-  ledcWrite(L_PIN, (vL / 20000.0) * MAX_DUTY);
-  ledcWrite(R_PIN, (vR / 20000.0) * MAX_DUTY);
-
-  // Log dữ liệu để chẩn đoán qua Terminal (tốc độ chậm để không lag)
+  // Debug để kiểm tra Expo và Auto-center
   if (millis() % 500 == 0) {
-    Serial.print("P: "); Serial.print(pI);
-    Serial.print(" | R: "); Serial.println(rI);
+    Serial.print("Diff_P: "); Serial.print(pI - midP);
+    Serial.print(" | Final_L: "); Serial.println(vL);
   }
-
-  delay(10); // Tần số điều khiển 100Hz
+  delay(10);
 }
