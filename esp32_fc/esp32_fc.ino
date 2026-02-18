@@ -5,16 +5,20 @@
 #define P_IN 14
 #define R_IN 27
 
-// --- CÀI ĐẶT BIỆN PHÁP MẠNH ---
-int GIOI_HAN_HANH_TRINH = 200; // Xung từ giữa (1500) chỉ được đi tối đa +/- 200 (Cực kỳ an toàn)
-int VUNG_CHET = 60;            // Thả tay ra là CHẾT CỨNG ở giữa
-int TRIM_L = 1500;             
-int TRIM_R = 1500;             
-float DO_MUOT_EXPO = 0.7;      // Làm mượt cực mạnh
+// --- QUẢN LÝ THÔNG MINH ---
+int GIOI_HAN = 250;      // Giới hạn hành trình tuyệt đối
+int VUNG_CHET_AI = 50;   // AI sẽ tự khóa Center nếu tín hiệu nằm trong vùng này
+int TRIM_L = 1500, TRIM_R = 1500;
 
 const int FREQ = 50, RES = 16, MAX_DUTY = 65535;
 long midP = 1500, midR = 1500;
-unsigned long lastSignalTime = 0;
+
+// Biến quản lý trạng thái AI
+enum SystemState {NORMAL, CENTER_LOCK, FAILSAFE};
+SystemState currentState = NORMAL;
+
+unsigned long lastValidPulse = 0;
+long prevP = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -23,72 +27,77 @@ void setup() {
   pinMode(P_IN, INPUT_PULLUP);
   pinMode(R_IN, INPUT_PULLUP);
 
-  Serial.println(">>> DANG EP CALIB... KHONG DUOC DONG CAN!");
+  Serial.println(">>> AI CALIBRATING...");
   delay(3000); 
   
-  // Đọc 100 lần lấy trung bình cho siêu chuẩn
-  long sP = 0, sR = 0;
+  // Thu thập dữ liệu mẫu để AI học "điểm tĩnh"
+  long sP = 0;
   for(int i=0; i<100; i++) {
     long p = pulseIn(P_IN, HIGH, 30000);
-    long r = pulseIn(R_IN, HIGH, 30000);
     sP += (p > 0) ? p : 1500;
-    sR += (r > 0) ? r : 1500;
-    delay(5);
+    delay(2);
   }
-  midP = sP / 100; midR = sR / 100;
-  Serial.printf("TAM CHUAN: P=%ld R=%ld\n", midP, midR);
+  midP = sP / 100;
+  midR = midP; // Giả định kênh Roll tương đương hoặc bạn có thể calib riêng
 }
 
 void loop() {
-  // Đọc xung
-  long pI = pulseIn(P_IN, HIGH, 25000); 
+  long pI = pulseIn(P_IN, HIGH, 25000);
   long rI = pulseIn(R_IN, HIGH, 25000);
 
-  // --- BIỆN PHÁP MẠNH 1: FAILSAFE THỜI GIAN THỰC ---
-  if (pI > 900 && pI < 2100) {
-    lastSignalTime = millis(); // Cập nhật thời điểm có sóng
+  // --- 1. AI FAILSAFE MANAGER (Quản lý mất sóng) ---
+  // AI nhận biết dựa trên: Thời gian mất xung HOẶC Xung bị đứng im (Frozen)
+  if (pI > 900 && pI < 2100 && pI != prevP) {
+    lastValidPulse = millis();
+    currentState = NORMAL;
+  } else if (millis() - lastValidPulse > 150) {
+    currentState = FAILSAFE;
+  }
+  prevP = pI;
+
+  float pOut = 0, rOut = 0;
+
+  if (currentState == FAILSAFE) {
+    // Ép về 0 ngay lập tức khi AI nhận diện mất sóng
+    pOut = 0; rOut = 0;
+    if(millis() % 500 == 0) Serial.println("[AI] STATUS: FAILSAFE!");
+  } 
+  else {
+    // --- 2. AI CENTER MANAGER (Quản lý vị trí giữa) ---
+    long diffP = pI - midP;
+    long diffR = rI - midR;
+
+    // AI phân tích: Nếu độ lệch nhỏ, kích hoạt CENTER_LOCK
+    if (abs(diffP) < VUNG_CHET_AI && abs(diffR) < VUNG_CHET_AI) {
+      currentState = CENTER_LOCK;
+      pOut = 0; rOut = 0;
+    } else {
+      // Nếu thoát vùng chết, áp dụng EXPO làm mượt
+      currentState = NORMAL;
+      float inP = constrain(diffP / 500.0, -1.0, 1.0);
+      pOut = (0.3 * inP + 0.7 * (inP * inP * inP)) * 500.0; // Expo 0.7
+      
+      float inR = constrain(diffR / 500.0, -1.0, 1.0);
+      rOut = (0.3 * inR + 0.7 * (inR * inR * inR)) * 500.0;
+    }
   }
 
-  // Nếu quá 100ms không có sóng mới hoặc pulseIn trả về 0 -> FAILSAFE
-  bool forcedFailsafe = (millis() - lastSignalTime > 100 || pI == 0);
-
-  float pFinal = 0, rFinal = 0;
-
-  if (!forcedFailsafe) {
-    // --- BIỆN PHÁP MẠNH 2: AUTO CENTER "BÀN TAY SẮT" ---
-    long pRaw = pI - midP;
-    long rRaw = rI - midR;
-
-    // Nếu nằm trong vùng chết -> Xóa sổ mọi cử động
-    if (abs(pRaw) < VUNG_CHET) pRaw = 0;
-    if (abs(rRaw) < VUNG_CHET) rRaw = 0;
-
-    // Tính Expo
-    float inP = constrain(pRaw / 500.0, -1.0, 1.0);
-    float expoP = ((1 - DO_MUOT_EXPO) * inP + DO_MUOT_EXPO * (inP * inP * inP)) * 500.0;
-    
-    float inR = constrain(rRaw / 500.0, -1.0, 1.0);
-    float expoR = ((1 - DO_MUOT_EXPO) * inR + DO_MUOT_EXPO * (inR * inR * inR)) * 500.0;
-
-    // --- BIỆN PHÁP MẠNH 3: GIỚI HẠN GÓC CƯỠNG BỨC ---
-    pFinal = constrain(expoP, -GIOI_HAN_HANH_TRINH, GIOI_HAN_HANH_TRINH);
-    rFinal = constrain(expoR, -GIOI_HAN_HANH_TRINH, GIOI_HAN_HANH_TRINH);
-  } else {
-    // KHI FAILSAFE: Đưa mọi giá trị về 0 tuyệt đối
-    pFinal = 0;
-    rFinal = 0;
-    if (millis() % 500 == 0) Serial.println("!!! CƯỠNG BỨC FAILSAFE !!!");
-  }
+  // --- 3. GIỚI HẠN GÓC CƯỠNG BỨC ---
+  pOut = constrain(pOut, -GIOI_HAN, GIOI_HAN);
+  rOut = constrain(rOut, -GIOI_HAN, GIOI_HAN);
 
   // MIXER
-  float vL = (float)TRIM_L + pFinal + rFinal;
-  float vR = (float)TRIM_R - pFinal + rFinal;
+  float vL = TRIM_L + pOut + rOut;
+  float vR = TRIM_R - pOut + rOut;
 
-  // XUẤT XUNG
   ledcWrite(L_PIN, (constrain(vL, 1000, 2000) / 20000.0) * MAX_DUTY);
   ledcWrite(R_PIN, (constrain(vR, 1000, 2000) / 20000.0) * MAX_DUTY);
 
-  if (millis() % 200 == 0 && !forcedFailsafe) {
-    Serial.printf("P_Final: %.2f | AutoCenter: %s\n", pFinal, (pFinal == 0 ? "LOCKED" : "MOVING"));
+  // Theo dõi AI làm việc
+  if (millis() % 200 == 0) {
+    Serial.print("MODE: "); 
+    if(currentState == CENTER_LOCK) Serial.println("CENTER_LOCKED");
+    else if(currentState == NORMAL) Serial.println("MANUAL");
+    else Serial.println("FAILSAFE");
   }
 }
