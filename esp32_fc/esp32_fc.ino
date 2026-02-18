@@ -7,7 +7,7 @@
 
 // --- QUẢN LÝ THÔNG MINH ---
 int GIOI_HAN = 250;      // Giới hạn hành trình tuyệt đối
-int VUNG_CHET_AI = 50;   // AI sẽ tự khóa Center nếu tín hiệu nằm trong vùng này
+int VUNG_CHET_AI = 70;   // AI sẽ tự khóa Center nếu tín hiệu nằm trong vùng này
 int TRIM_L = 1500, TRIM_R = 1500;
 
 const int FREQ = 50, RES = 16, MAX_DUTY = 65535;
